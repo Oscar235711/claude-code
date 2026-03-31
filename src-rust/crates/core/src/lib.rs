@@ -411,6 +411,8 @@ pub mod config {
         pub max_tokens: Option<u32>,
         pub permission_mode: PermissionMode,
         pub theme: Theme,
+        #[serde(default)]
+        pub output_style: Option<String>,
         pub auto_compact: bool,
         pub compact_threshold: f32,
         pub verbose: bool,
@@ -424,6 +426,8 @@ pub mod config {
         pub append_system_prompt: Option<String>,
         pub disable_claude_mds: bool,
         pub project_dir: Option<PathBuf>,
+        #[serde(default)]
+        pub workspace_paths: Vec<PathBuf>,
         /// Event hooks: map of event → list of hook commands.
         #[serde(default)]
         pub hooks: HashMap<HookEvent, Vec<HookEntry>>,
@@ -516,6 +520,14 @@ pub mod config {
             } else {
                 crate::constants::DEFAULT_COMPACT_THRESHOLD
             }
+        }
+
+        /// Resolve the effective output style for system-prompt assembly.
+        pub fn effective_output_style(&self) -> crate::system_prompt::OutputStyle {
+            self.output_style
+                .as_deref()
+                .map(crate::system_prompt::OutputStyle::from_str)
+                .unwrap_or_default()
         }
 
         /// Resolve the API key from the config, then from `ANTHROPIC_API_KEY`.
@@ -631,6 +643,28 @@ pub mod config {
             }
             let content = serde_json::to_string_pretty(self)?;
             tokio::fs::write(&path, content).await?;
+            Ok(())
+        }
+
+        /// Synchronous variant used by pre-session commands.
+        pub fn load_sync() -> anyhow::Result<Self> {
+            let path = Self::global_settings_path();
+            if path.exists() {
+                let content = std::fs::read_to_string(&path)?;
+                Ok(serde_json::from_str(&content).unwrap_or_default())
+            } else {
+                Ok(Self::default())
+            }
+        }
+
+        /// Synchronous variant used by pre-session commands.
+        pub fn save_sync(&self) -> anyhow::Result<()> {
+            let path = Self::global_settings_path();
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let content = serde_json::to_string_pretty(self)?;
+            std::fs::write(&path, content)?;
             Ok(())
         }
     }

@@ -59,6 +59,8 @@ pub struct QueryConfig {
     pub max_turns: u32,
     pub system_prompt: Option<String>,
     pub append_system_prompt: Option<String>,
+    pub output_style: cc_core::system_prompt::OutputStyle,
+    pub working_directory: Option<String>,
     pub thinking_budget: Option<u32>,
     pub temperature: Option<f32>,
 }
@@ -71,6 +73,8 @@ impl Default for QueryConfig {
             max_turns: cc_core::constants::MAX_TURNS_DEFAULT,
             system_prompt: None,
             append_system_prompt: None,
+            output_style: cc_core::system_prompt::OutputStyle::Default,
+            working_directory: None,
             thinking_budget: None,
             temperature: None,
         }
@@ -82,6 +86,11 @@ impl QueryConfig {
         Self {
             model: cfg.effective_model().to_string(),
             max_tokens: cfg.effective_max_tokens(),
+            output_style: cfg.effective_output_style(),
+            working_directory: cfg
+                .project_dir
+                .as_ref()
+                .map(|p| p.display().to_string()),
             ..Default::default()
         }
     }
@@ -440,13 +449,12 @@ fn build_system_prompt(config: &QueryConfig) -> SystemPrompt {
         custom_system_prompt: config.system_prompt.clone(),
         append_system_prompt: config.append_system_prompt.clone(),
         // All other fields use sensible defaults:
-        // - prefix:              auto-detect from env
-        // - output_style:        Default (no suffix)
-        // - working_directory:   None (callers inject via append if needed)
-        // - memory_content:      empty (callers inject via append if needed)
+        // - prefix:                auto-detect from env
+        // - memory_content:        empty (callers inject via append if needed)
         // - replace_system_prompt: false (additive mode)
-        // - coordinator_mode:    false
-        output_style: OutputStyle::Default,
+        // - coordinator_mode:      false
+        output_style: config.output_style,
+        working_directory: config.working_directory.clone(),
         ..Default::default()
     };
 

@@ -7,7 +7,7 @@ The process was explicitly two-phase:
 
 Specification [`spec/`](https://github.com/kuberwastaken/claude-code/tree/main/spec) - An AI agent analyzed the source and produced exhaustive behavioral specifications and improvements, deviated from the original: architecture, data flows, tool contracts, system designs. No source code was carried forward.
 
-Implementation [`src/`](https://github.com/kuberwastaken/claude-code/tree/main/src-rust)- A separate AI agent implemented from the spec alone, never referencing the original TypeScript. The output is idiomatic Rust that reproduces the behavior, not the expression.
+Implementation [`src-rust/`](https://github.com/kuberwastaken/claude-code/tree/main/src-rust)- A separate AI agent implemented from the spec alone, never referencing the original TypeScript. The output is idiomatic Rust that reproduces the behavior, not the expression.
 
 This mirrors the legal precedent established by Phoenix Technologies v. IBM (1984) — clean-room engineering of the BIOS — and the principle from Baker v. Selden (1879) that copyright protects expression, not ideas or behavior.
 
@@ -353,6 +353,14 @@ Claude Code's tool system lives in [`tools/`](https://github.com/kuberwastaken/c
 | **WorkflowTool** | Execute workflow scripts |
 | **ConfigTool** | Modify settings (**internal only**) |
 | **TungstenTool** | Advanced features (**internal only**) |
+| **MCPTool** | Generic MCP tool execution |
+| **McpAuthTool** | MCP server authentication |
+| **SyntheticOutputTool** | Structured output via dynamic JSON schemas |
+| **SuggestBackgroundPRTool** | Suggest background PRs (**internal only**) |
+| **VerifyPlanExecutionTool** | Verify plan execution (gated by `CLAUDE_CODE_VERIFY_PLAN`) |
+| **CtxInspectTool** | Context window inspection (gated by `CONTEXT_COLLAPSE`) |
+| **TerminalCaptureTool** | Terminal panel capture (gated by `TERMINAL_PANEL`) |
+| **CronCreateTool** / **CronDeleteTool** / **CronListTool** | Granular cron job management (under `ScheduleCronTool/`) |
 | **SendUserFile** / **PushNotification** / **SubscribePR** | KAIROS-exclusive tools |
 
 Tools are registered via `getAllBaseTools()` and filtered by feature gates, user type, environment flags, and permission deny rules. There's a **tool schema cache** ([`toolSchemaCache.ts`](https://github.com/kuberwastaken/claude-code/blob/main/src-rust/crates/tools/src/lib.rs)) that caches JSON schemas for prompt efficiency.
@@ -398,6 +406,33 @@ The [`constants/betas.ts`](https://github.com/kuberwastaken/claude-code/blob/mai
 ```
 
 `redact-thinking`, `afk-mode`, and `advisor-tool` are also not released.
+
+---
+
+## Upcoming Models - Capybara, Opus 4.7, and Sonnet 4.8
+
+The codebase contains references to unreleased Anthropic models that haven't been publicly announced:
+
+- **Claude "Capybara"** - A new model family already in version 2, with a variant called `capybara-v2-fast` being prepared with a **1M context window**
+- **Capybara comes in "fast" and regular thinking** tiers
+- **Opus 4.7** and **Sonnet 4.8** are already referenced within the code
+
+### Production Engineering Around Capybara
+
+The code reveals that Anthropic observed a **real production failure mode**: Capybara can prematurely stop generating when the prompt shape resembles a turn boundary after tool results. Rather than waiting for a model fix, they mitigated it with **prompt-shape surgery**:
+
+1. **Force a safe boundary marker** (`Tool loaded.`) to prevent ambiguous turn boundaries
+2. **Relocate risky sibling blocks** that could trigger premature stops
+3. **Smoosh reminder text into tool results** to maintain generation flow
+4. **Add non-empty markers for empty tool outputs** to avoid confusing the model
+
+All of this is wrapped with **kill-switchable gates** (`tengu_*` prefixed flags) so rollout can be staged and reverted quickly.
+
+- Comments include **concrete A/B test evidence** (not hand-wavy), which typically means this area was **launch-critical** and closely monitored
+- Comments like *"un-gate once validated on external via A/B"* confirm that **ant/internal users are canary lanes** before broader rollout
+- The strongest interpretation: Anthropic is working toward a **Capybara model family** with a fast-tier variant (`capybara-v2-fast`), supporting up to **1M context**
+
+Nothing confirms a launch date or official SKU naming, but the implementation signatures fit a model family that is actively being prepared for release ;)
 
 ---
 

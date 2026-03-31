@@ -151,10 +151,6 @@ struct Cli {
     #[arg(long = "dangerously-skip-permissions", action = ArgAction::SetTrue)]
     dangerously_skip_permissions: bool,
 
-    /// Show version and exit
-    #[arg(long = "version", short = 'V', action = ArgAction::SetTrue)]
-    version_flag: bool,
-
     /// Dump the system prompt to stdout and exit
     #[arg(long = "dump-system-prompt", action = ArgAction::SetTrue, hide = true)]
     dump_system_prompt: bool,
@@ -449,6 +445,8 @@ async fn main() -> anyhow::Result<()> {
         max_turns: cli.max_turns,
         system_prompt: Some(system_prompt),
         append_system_prompt: None,
+        output_style: config.effective_output_style(),
+        working_directory: Some(cwd.display().to_string()),
         thinking_budget: None,
         temperature: None,
     };
@@ -804,6 +802,11 @@ async fn run_interactive(
                                     app.config = new_cfg;
                                     app.status_message =
                                         Some("Configuration updated.".to_string());
+                                }
+                                Some(CommandResult::ConfigChangeMessage(new_cfg, msg)) => {
+                                    cmd_ctx.config = new_cfg.clone();
+                                    app.config = new_cfg;
+                                    app.status_message = Some(msg);
                                 }
                                 Some(CommandResult::UserMessage(msg)) => {
                                     // Inject as user turn

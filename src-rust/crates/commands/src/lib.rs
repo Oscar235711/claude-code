@@ -5,9 +5,10 @@
 // Each command is a struct implementing the `SlashCommand` trait.
 
 use async_trait::async_trait;
-use cc_core::config::Config;
+use cc_core::config::{Config, Settings, Theme};
 use cc_core::cost::CostTracker;
 use cc_core::types::Message;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 #[allow(unused_imports)]
 use std::path::PathBuf;
@@ -34,6 +35,8 @@ pub enum CommandResult {
     UserMessage(String),
     /// Modify the configuration.
     ConfigChange(Config),
+    /// Modify the configuration and show a specific status message.
+    ConfigChangeMessage(Config, String),
     /// Clear the conversation.
     ClearConversation,
     /// Replace the conversation with a specific message list (used by /rewind).
@@ -111,6 +114,141 @@ pub struct RenameCommand;
 pub struct EffortCommand;
 pub struct SummaryCommand;
 pub struct CommitCommand;
+pub struct ThemeCommand;
+pub struct OutputStyleCommand;
+pub struct KeybindingsCommand;
+pub struct PrivacySettingsCommand;
+
+#[derive(serde::Serialize)]
+struct KeybindingTemplateFile {
+    #[serde(rename = "$schema")]
+    schema: &'static str,
+    #[serde(rename = "$docs")]
+    docs: &'static str,
+    bindings: Vec<KeybindingTemplateBlock>,
+}
+
+#[derive(serde::Serialize)]
+struct KeybindingTemplateBlock {
+    context: String,
+    bindings: BTreeMap<String, Option<String>>,
+}
+
+fn save_settings_mutation<F>(mutate: F) -> anyhow::Result<()>
+where
+    F: FnOnce(&mut Settings),
+{
+    let mut settings = Settings::load_sync()?;
+    mutate(&mut settings);
+    settings.save_sync()
+}
+
+fn open_with_system(target: &str) -> std::io::Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        let ps_cmd = format!("Start-Process '{}'", target.replace('\'', "''"));
+        std::process::Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &ps_cmd])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()?;
+        return Ok(());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(target)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()?;
+        return Ok(());
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(target)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()?;
+        Ok(())
+    }
+}
+
+fn format_keystroke(keystroke: &cc_core::keybindings::ParsedKeystroke) -> String {
+    let mut parts = Vec::new();
+    if keystroke.ctrl {
+        parts.push("ctrl".to_string());
+    }
+    if keystroke.alt {
+        parts.push("alt".to_string());
+    }
+    if keystroke.shift {
+        parts.push("shift".to_string());
+    }
+    if keystroke.meta {
+        parts.push("meta".to_string());
+    }
+    parts.push(match keystroke.key.as_str() {
+        "space" => "space".to_string(),
+        other => other.to_string(),
+    });
+    parts.join("+")
+}
+
+fn format_chord(chord: &[cc_core::keybindings::ParsedKeystroke]) -> String {
+    chord
+        .iter()
+        .map(format_keystroke)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn generate_keybindings_template() -> anyhow::Result<String> {
+    let mut grouped: BTreeMap<String, BTreeMap<String, Option<String>>> = BTreeMap::new();
+    for binding in cc_core::keybindings::default_bindings() {
+        let chord = format_chord(&binding.chord);
+        if cc_core::keybindings::NON_REBINDABLE.contains(&chord.as_str()) {
+            continue;
+        }
+        grouped
+            .entry(format!("{:?}", binding.context))
+            .or_default()
+            .insert(chord, binding.action.clone());
+    }
+
+    let template = KeybindingTemplateFile {
+        schema: "https://www.schemastore.org/claude-code-keybindings.json",
+        docs: "https://code.claude.com/docs/en/keybindings",
+        bindings: grouped
+            .into_iter()
+            .map(|(context, bindings)| KeybindingTemplateBlock { context, bindings })
+            .collect(),
+    };
+
+    Ok(format!(
+        "{}\n",
+        serde_json::to_string_pretty(&template)?
+    ))
+}
+
+fn parse_theme(name: &str) -> Option<Theme> {
+    match name.trim().to_lowercase().as_str() {
+        "default" | "system" => Some(Theme::Default),
+        "dark" => Some(Theme::Dark),
+        "light" => Some(Theme::Light),
+        custom if !custom.is_empty() => Some(Theme::Custom(custom.to_string())),
+        _ => None,
+    }
+}
+
+fn current_output_style_name(config: &Config) -> &str {
+    config.output_style.as_deref().unwrap_or("default")
+}
 
 // ---- /help ---------------------------------------------------------------
 
@@ -262,9 +400,311 @@ impl SlashCommand for ConfigCommand {
     fn name(&self) -> &str { "config" }
     fn description(&self) -> &str { "Show or modify configuration settings" }
 
+    async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
+        let args = args.trim();
+        if args.is_empty() || matches!(args, "show" | "get") {
+            let json = serde_json::to_string_pretty(&ctx.config).unwrap_or_default();
+            return CommandResult::Message(format!(
+                "Current configuration:\n{}\n\nUsage:\n  /config\n  /config set theme <default|dark|light>\n  /config set output-style <default|concise|explanatory|learning|formal|casual>\n  /config set model <model>\n  /config set permission-mode <default|accept-edits|bypass-permissions|plan>\n  /config unset <model|output-style>",
+                json
+            ));
+        }
+
+        if let Some(key) = args.strip_prefix("get ").map(str::trim) {
+            return match key {
+                "theme" => CommandResult::Message(format!("theme = {:?}", ctx.config.theme)),
+                "output-style" | "output_style" => CommandResult::Message(format!(
+                    "output-style = {}",
+                    current_output_style_name(&ctx.config)
+                )),
+                "model" => CommandResult::Message(format!(
+                    "model = {}",
+                    ctx.config.effective_model()
+                )),
+                "permission-mode" | "permission_mode" => CommandResult::Message(format!(
+                    "permission-mode = {:?}",
+                    ctx.config.permission_mode
+                )),
+                other => CommandResult::Error(format!("Unknown config key '{}'", other)),
+            };
+        }
+
+        if let Some(key) = args.strip_prefix("unset ").map(str::trim) {
+            return match key {
+                "model" => {
+                    let mut new_config = ctx.config.clone();
+                    new_config.model = None;
+                    if let Err(err) = save_settings_mutation(|settings| settings.config.model = None)
+                    {
+                        return CommandResult::Error(format!(
+                            "Failed to save configuration: {}",
+                            err
+                        ));
+                    }
+                    CommandResult::ConfigChangeMessage(
+                        new_config,
+                        "Model reset to the default for new sessions.".to_string(),
+                    )
+                }
+                "output-style" | "output_style" => {
+                    let mut new_config = ctx.config.clone();
+                    new_config.output_style = None;
+                    if let Err(err) =
+                        save_settings_mutation(|settings| settings.config.output_style = None)
+                    {
+                        return CommandResult::Error(format!(
+                            "Failed to save configuration: {}",
+                            err
+                        ));
+                    }
+                    CommandResult::ConfigChangeMessage(
+                        new_config,
+                        "Output style reset to default.".to_string(),
+                    )
+                }
+                other => CommandResult::Error(format!("Unknown config key '{}'", other)),
+            };
+        }
+
+        let mut parts = args.splitn(3, ' ');
+        let command = parts.next().unwrap_or_default();
+        let key = parts.next().unwrap_or_default().trim();
+        let value = parts.next().unwrap_or_default().trim();
+        if command != "set" || key.is_empty() || value.is_empty() {
+            return CommandResult::Error("Usage: /config set <key> <value>".to_string());
+        }
+
+        match key {
+            "theme" => {
+                let Some(theme) = parse_theme(value) else {
+                    return CommandResult::Error(
+                        "Theme must be one of: default, dark, light".to_string(),
+                    );
+                };
+                let mut new_config = ctx.config.clone();
+                new_config.theme = theme.clone();
+                if let Err(err) =
+                    save_settings_mutation(|settings| settings.config.theme = theme.clone())
+                {
+                    return CommandResult::Error(format!("Failed to save configuration: {}", err));
+                }
+                CommandResult::ConfigChangeMessage(
+                    new_config,
+                    format!("Theme set to {}.", value.trim().to_lowercase()),
+                )
+            }
+            "output-style" | "output_style" => {
+                let normalized = value.trim().to_lowercase();
+                let valid = ["default", "concise", "explanatory", "learning", "formal", "casual"];
+                if !valid.contains(&normalized.as_str()) {
+                    return CommandResult::Error(format!(
+                        "Unsupported output style '{}'. Use one of: {}",
+                        value,
+                        valid.join(", ")
+                    ));
+                }
+
+                let mut new_config = ctx.config.clone();
+                new_config.output_style =
+                    (normalized != "default").then(|| normalized.clone());
+                if let Err(err) = save_settings_mutation(|settings| {
+                    settings.config.output_style =
+                        (normalized != "default").then(|| normalized.clone());
+                }) {
+                    return CommandResult::Error(format!("Failed to save configuration: {}", err));
+                }
+                CommandResult::ConfigChangeMessage(
+                    new_config,
+                    format!(
+                        "Output style set to {}. Changes take effect on the next request.",
+                        normalized
+                    ),
+                )
+            }
+            "model" => {
+                let mut new_config = ctx.config.clone();
+                new_config.model = Some(value.to_string());
+                if let Err(err) = save_settings_mutation(|settings| {
+                    settings.config.model = Some(value.to_string());
+                }) {
+                    return CommandResult::Error(format!("Failed to save configuration: {}", err));
+                }
+                CommandResult::ConfigChangeMessage(
+                    new_config,
+                    format!("Model set to {}.", value),
+                )
+            }
+            "permission-mode" | "permission_mode" => {
+                let mode = match value.trim().to_lowercase().as_str() {
+                    "default" => cc_core::config::PermissionMode::Default,
+                    "accept-edits" | "accept_edits" => {
+                        cc_core::config::PermissionMode::AcceptEdits
+                    }
+                    "bypass-permissions" | "bypass_permissions" => {
+                        cc_core::config::PermissionMode::BypassPermissions
+                    }
+                    "plan" => cc_core::config::PermissionMode::Plan,
+                    _ => {
+                        return CommandResult::Error(
+                            "Permission mode must be one of: default, accept-edits, bypass-permissions, plan"
+                                .to_string(),
+                        )
+                    }
+                };
+
+                let mut new_config = ctx.config.clone();
+                new_config.permission_mode = mode.clone();
+                if let Err(err) = save_settings_mutation(|settings| {
+                    settings.config.permission_mode = mode.clone();
+                }) {
+                    return CommandResult::Error(format!("Failed to save configuration: {}", err));
+                }
+                CommandResult::ConfigChangeMessage(
+                    new_config,
+                    format!("Permission mode set to {}.", value.trim().to_lowercase()),
+                )
+            }
+            other => CommandResult::Error(format!("Unknown config key '{}'", other)),
+        }
+    }
+}
+
+// ---- /theme --------------------------------------------------------------
+
+#[async_trait]
+impl SlashCommand for ThemeCommand {
+    fn name(&self) -> &str { "theme" }
+    fn aliases(&self) -> Vec<&str> { vec!["color"] }
+    fn description(&self) -> &str { "Show or change the current theme" }
+    fn help(&self) -> &str {
+        "Usage: /theme [default|dark|light]\n\
+         Without arguments, shows the active theme. With an argument, updates the theme for this and future sessions."
+    }
+
+    async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
+        let args = args.trim();
+        if args.is_empty() {
+            return CommandResult::Message(format!(
+                "Current theme: {:?}\nUse /theme <default|dark|light> to change it.",
+                ctx.config.theme
+            ));
+        }
+
+        let Some(theme) = parse_theme(args) else {
+            return CommandResult::Error(
+                "Theme must be one of: default, dark, light".to_string(),
+            );
+        };
+
+        let mut new_config = ctx.config.clone();
+        new_config.theme = theme.clone();
+        if let Err(err) = save_settings_mutation(|settings| settings.config.theme = theme.clone())
+        {
+            return CommandResult::Error(format!("Failed to save theme: {}", err));
+        }
+
+        CommandResult::ConfigChangeMessage(
+            new_config,
+            format!("Theme set to {}.", args.to_lowercase()),
+        )
+    }
+}
+
+// ---- /output-style -------------------------------------------------------
+
+#[async_trait]
+impl SlashCommand for OutputStyleCommand {
+    fn name(&self) -> &str { "output-style" }
+    fn description(&self) -> &str { "Show the output-style migration guidance" }
+
     async fn execute(&self, _args: &str, ctx: &mut CommandContext) -> CommandResult {
-        let json = serde_json::to_string_pretty(&ctx.config).unwrap_or_default();
-        CommandResult::Message(format!("Current configuration:\n{}", json))
+        CommandResult::Message(format!(
+            "/output-style has been deprecated. Use /config to change your output style, or set it in your settings file. Changes take effect on the next session.\nCurrent output style: {}",
+            current_output_style_name(&ctx.config)
+        ))
+    }
+}
+
+// ---- /keybindings --------------------------------------------------------
+
+#[async_trait]
+impl SlashCommand for KeybindingsCommand {
+    fn name(&self) -> &str { "keybindings" }
+    fn description(&self) -> &str { "Create or open ~/.claude/keybindings.json" }
+
+    async fn execute(&self, _args: &str, _ctx: &mut CommandContext) -> CommandResult {
+        let config_dir = Settings::config_dir();
+        let path = config_dir.join("keybindings.json");
+        let existed = path.exists();
+
+        if !existed {
+            if let Err(err) = std::fs::create_dir_all(&config_dir) {
+                return CommandResult::Error(format!(
+                    "Failed to create {}: {}",
+                    config_dir.display(),
+                    err
+                ));
+            }
+
+            let template = match generate_keybindings_template() {
+                Ok(template) => template,
+                Err(err) => {
+                    return CommandResult::Error(format!(
+                        "Failed to generate keybindings template: {}",
+                        err
+                    ))
+                }
+            };
+
+            if let Err(err) = std::fs::write(&path, template) {
+                return CommandResult::Error(format!(
+                    "Failed to write {}: {}",
+                    path.display(),
+                    err
+                ));
+            }
+        }
+
+        match open_with_system(&path.display().to_string()) {
+            Ok(_) => CommandResult::Message(if existed {
+                format!("Opened {} in your editor.", path.display())
+            } else {
+                format!(
+                    "Created {} with a template and opened it in your editor.",
+                    path.display()
+                )
+            }),
+            Err(err) => CommandResult::Message(if existed {
+                format!(
+                    "Opened {}. Could not launch an editor automatically: {}",
+                    path.display(),
+                    err
+                )
+            } else {
+                format!(
+                    "Created {} with a template. Could not launch an editor automatically: {}",
+                    path.display(),
+                    err
+                )
+            }),
+        }
+    }
+}
+
+// ---- /privacy-settings ---------------------------------------------------
+
+#[async_trait]
+impl SlashCommand for PrivacySettingsCommand {
+    fn name(&self) -> &str { "privacy-settings" }
+    fn description(&self) -> &str { "Open Claude privacy settings" }
+
+    async fn execute(&self, _args: &str, _ctx: &mut CommandContext) -> CommandResult {
+        let url = "https://claude.ai/settings/data-privacy-controls";
+        let fallback = format!("Review and manage your privacy settings at {}", url);
+        match open_with_system(url) {
+            Ok(_) => CommandResult::Message(format!("Opened privacy settings: {}", url)),
+            Err(_) => CommandResult::Message(fallback),
+        }
     }
 }
 
@@ -1086,6 +1526,10 @@ pub fn all_commands() -> Vec<Box<dyn SlashCommand>> {
         Box::new(TasksCommand),
         Box::new(SessionCommand),
         Box::new(ThinkingCommand),
+        Box::new(ThemeCommand),
+        Box::new(OutputStyleCommand),
+        Box::new(KeybindingsCommand),
+        Box::new(PrivacySettingsCommand),
         // New commands
         Box::new(ExportCommand),
         Box::new(SkillsCommand),

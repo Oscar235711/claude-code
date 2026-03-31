@@ -128,10 +128,28 @@ impl NamedCommand for AddDirCommand {
             Err(e) => return CommandResult::Error(format!("Cannot resolve path: {e}")),
         };
 
-        // TODO: persist to settings.json `workspacePaths` array
+        let mut settings = match cc_core::config::Settings::load_sync() {
+            Ok(s) => s,
+            Err(e) => {
+                return CommandResult::Error(format!(
+                    "Failed to load settings before updating workspace paths: {e}"
+                ))
+            }
+        };
+
+        if !settings.config.workspace_paths.iter().any(|p| p == &abs_path) {
+            settings.config.workspace_paths.push(abs_path.clone());
+            if let Err(e) = settings.save_sync() {
+                return CommandResult::Error(format!(
+                    "Added {} for this session, but failed to save settings: {}",
+                    abs_path.display(),
+                    e
+                ));
+            }
+        }
+
         CommandResult::Message(format!(
-            "Added {} to allowed workspace paths.\n\
-             Note: restart Claude Code for the change to take effect.",
+            "Added {} to allowed workspace paths.",
             abs_path.display()
         ))
     }

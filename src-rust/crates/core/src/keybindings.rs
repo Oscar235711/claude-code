@@ -57,6 +57,9 @@ pub fn parse_keystroke(s: &str) -> Option<ParsedKeystroke> {
 
     for part in s.split('+') {
         let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
         match part {
             "ctrl" | "control" => ctrl = true,
             "alt" | "opt" | "option" => alt = true,
@@ -165,6 +168,18 @@ pub struct UserKeybindings {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct JsonKeybindingConfig {
+    #[serde(default)]
+    bindings: Vec<JsonKeybindingBlock>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct JsonKeybindingBlock {
+    context: String,
+    bindings: HashMap<String, Option<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserBinding {
     pub chord: String,          // e.g. "ctrl+k ctrl+d"
     pub action: Option<String>, // None = unbound
@@ -172,10 +187,16 @@ pub struct UserBinding {
 }
 
 impl UserKeybindings {
+    pub fn from_json_str(content: &str) -> Self {
+        serde_json::from_str(content)
+            .or_else(|_| Self::from_block_config(content))
+            .unwrap_or_default()
+    }
+
     pub fn load(config_dir: &Path) -> Self {
         let path = config_dir.join("keybindings.json");
         if let Ok(content) = std::fs::read_to_string(&path) {
-            serde_json::from_str(&content).unwrap_or_default()
+            Self::from_json_str(&content)
         } else {
             Self::default()
         }
@@ -186,6 +207,23 @@ impl UserKeybindings {
         let json = serde_json::to_string_pretty(self)?;
         std::fs::write(path, json)?;
         Ok(())
+    }
+
+    fn from_block_config(content: &str) -> Result<Self, serde_json::Error> {
+        let config: JsonKeybindingConfig = serde_json::from_str(content)?;
+        let bindings = config
+            .bindings
+            .into_iter()
+            .flat_map(|block| {
+                let context = block.context;
+                block.bindings.into_iter().map(move |(chord, action)| UserBinding {
+                    chord,
+                    action,
+                    context: Some(context.clone()),
+                })
+            })
+            .collect();
+        Ok(Self { bindings })
     }
 }
 
@@ -419,5 +457,29 @@ mod tests {
     fn test_user_keybindings_default_empty() {
         let user = UserKeybindings::default();
         assert!(user.bindings.is_empty());
+    }
+
+    #[test]
+    fn test_user_keybindings_supports_ts_block_format() {
+        let user = UserKeybindings::from_json_str(
+            r#"{
+  "bindings": [
+    {
+      "context": "Chat",
+      "bindings": {
+        "ctrl+g": "chat:externalEditor",
+        "space": null
+      }
+    }
+  ]
+}"#,
+        );
+
+        assert_eq!(user.bindings.len(), 2);
+        assert_eq!(user.bindings[0].context.as_deref(), Some("Chat"));
+        assert_eq!(user.bindings[0].chord, "ctrl+g");
+        assert_eq!(user.bindings[0].action.as_deref(), Some("chat:externalEditor"));
+        assert_eq!(user.bindings[1].chord, "space");
+        assert_eq!(user.bindings[1].action, None);
     }
 }

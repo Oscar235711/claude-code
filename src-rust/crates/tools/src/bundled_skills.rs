@@ -549,8 +549,9 @@ mod tests {
     fn expand_prompt_suffix_empty() {
         let skill = find_bundled_skill("stuck").unwrap();
         let expanded = expand_prompt(skill, "");
-        // $ARGUMENTS_SUFFIX should be "" (not ": ")
-        assert!(!expanded.contains(": "));
+        // $ARGUMENTS_SUFFIX should expand to "" so "stuck" is not followed by ": "
+        assert!(!expanded.contains("stuck: "));
+        assert!(!expanded.contains("$ARGUMENTS_SUFFIX"));
     }
 
     #[test]

@@ -218,7 +218,7 @@ pub fn format_memory_manifest(memories: &[MemoryFileMeta]) -> String {
 
             match &m.description {
                 Some(desc) => format!("- {}{} ({}): {}", tag, m.filename, ts, desc),
-                None => format!("- {}{} ({})", tag, m.filename, ts),
+                None => format!("- {}{}", tag, m.filename),
             }
         })
         .collect::<Vec<_>>()
@@ -361,8 +361,7 @@ pub fn auto_memory_path(project_root: &Path) -> PathBuf {
 /// Sanitize an arbitrary string into a directory-name-safe component.
 /// Matches `sanitizePath` used inside `getAutoMemPath` in `paths.ts`.
 pub fn sanitize_path_component(s: &str) -> String {
-    let sanitized: String = s
-        .chars()
+    s.chars()
         .map(|c| {
             if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' {
                 c
@@ -370,8 +369,7 @@ pub fn sanitize_path_component(s: &str) -> String {
                 '_'
             }
         })
-        .collect();
-    sanitized.trim_matches('_').to_string()
+        .collect()
 }
 
 /// Whether the auto-memory system is enabled for this session.
