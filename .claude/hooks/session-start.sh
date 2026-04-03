@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -eu
 
 # 只在 Claude Code remote 环境执行
 if [ "${CLAUDE_CODE_REMOTE:-}" != "true" ]; then
