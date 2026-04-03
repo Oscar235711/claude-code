@@ -1,7 +1,6 @@
-#!/usr/bin/env bash
+#!/bin/sh
 set -eu
 
-# 只在 Claude Code remote 环境执行
 if [ "${CLAUDE_CODE_REMOTE:-}" != "true" ]; then
   exit 0
 fi
@@ -14,4 +13,10 @@ if [ ! -f "$RUST_DIR/Cargo.toml" ]; then
 fi
 
 cd "$RUST_DIR"
-cargo fetch
+
+echo "[hook] rust dependency warmup start" >&2
+cargo metadata --no-deps >/dev/null 2>&1 || true
+cargo fetch >/dev/null 2>&1 || true
+echo "[hook] rust dependency warmup done" >&2
+
+exit 0
